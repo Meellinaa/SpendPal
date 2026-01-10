@@ -1,72 +1,57 @@
-import logging
+# Save this as CloudManager.py
 import certifi
 from pymongo import MongoClient
 from datetime import datetime
 
-# Primary cloud-based category predictor (may fail or return generic 'Other')
-try:
-    from Brain import predict_category
-except Exception:
-    predict_category = None
-
-# Fallback local categorizer
-try:
-    from SmartCategorizer import categorize_item as fallback_categorize
-except Exception:
-    fallback_categorize = None
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
 class CloudManager:
     def __init__(self):
+        # 1. Connect to MongoDB
         self.uri = "mongodb+srv://melinafathi3825_db_user:TLUujP6ELG1NtXE1@snapcart.avy60sg.mongodb.net/?appName=SnapCart"
         try:
             self.client = MongoClient(self.uri, tlsCAFile=certifi.where())
-            # Use the DB/collection names your app reads from
-            self.db = self.client["spendpal"]
+            self.db = self.client["spendpal"] 
             self.receipts_col = self.db["receipts"]
-            logger.info("CloudManager connected to MongoDB: spendpal -> receipts")
-        except Exception as e:
-            logger.exception("CloudManager connection error")
+            print("✅ Cloud Connected.")
+        except:
+            print("❌ Cloud Connection Failed")
+
+        # 2. LOAD THE FILE (The Fix for 'Other')
+        self.grocery_set = set()
+        try:
+            with open('grocery_items_cleaned.txt', 'r') as f:
+                # Clean and lowercase everything
+                self.grocery_set = {line.strip().lower() for line in f if line.strip()}
+            print(f"✅ Loaded {len(self.grocery_set)} items from text file.")
+        except FileNotFoundError:
+            print("⚠️ ERROR: Could not find grocery_items_cleaned.txt")
+
+    def categorize(self, item_name):
+        """Strict check: If in file -> Groceries."""
+        clean_name = item_name.lower().strip()
+        
+        # DEBUG: Print what we are checking
+        # print(f"Checking '{clean_name}'...") 
+
+        if clean_name in self.grocery_set:
+            print(f"   -> MATCH! '{clean_name}' is Groceries.")
+            return "Groceries", "General"
+        
+        # Partial match check (e.g. 'gala apple' contains 'apple')
+        for known_item in self.grocery_set:
+            if known_item in clean_name and len(known_item) > 3:
+                print(f"   -> PARTIAL MATCH! '{clean_name}' contains '{known_item}'")
+                return "Groceries", "General"
+
+        print(f"   -> No match for '{clean_name}'. Defaults to Other.")
+        return "Other", "General"
 
     def process_and_save(self, items, total):
-        """Categorize items and save a receipt doc to MongoDB.
-
-        Uses `Brain.predict_category` when available; if it returns a generic
-        'Other' or is unavailable, we fall back to `SmartCategorizer.categorize_item`.
-        """
         categorized_items = []
-
+        
         for name, price in items:
-            main_cat = None
-            sub_cat = None
-
-            # Primary predictor
-            if predict_category:
-                try:
-                    main_cat, sub_cat = predict_category(name)
-                except Exception:
-                    logger.exception("predict_category failed for '%s'", name)
-
-            # If primary not available or returned a generic/empty result, try fallback
-            if (not main_cat or main_cat == "Other") and fallback_categorize:
-                try:
-                    fb_main, fb_sub = fallback_categorize(name)
-                    # Only adopt fallback if it gives something other than Other
-                    if fb_main and fb_main != "Other":
-                        main_cat, sub_cat = fb_main, fb_sub
-                        logger.debug("Fallback categorizer assigned %s/%s for %s", fb_main, fb_sub, name)
-                except Exception:
-                    logger.exception("Fallback categorize failed for '%s'", name)
-
-            # Final safety: force sensible defaults
-            if not main_cat:
-                main_cat = "Other"
-            if not sub_cat:
-                sub_cat = "General"
-
+            # Use the logic above
+            main_cat, sub_cat = self.categorize(name)
+            
             categorized_items.append({
                 "name": name,
                 "price": price,
@@ -74,16 +59,12 @@ class CloudManager:
                 "subcategory": sub_cat
             })
 
-        receipt_doc = {
+        # Save to Cloud
+        doc = {
             "date": datetime.now(),
+            "store": "Scanned Receipt",
             "items": categorized_items,
             "total": total
         }
-
-        try:
-            self.receipts_col.insert_one(receipt_doc)
-            logger.info("Successfully saved receipt to Cloud (items=%d, total=%s)", len(categorized_items), total)
-        except Exception:
-            logger.exception("Failed to save receipt to Cloud")
-
+        self.receipts_col.insert_one(doc)
         return categorized_items

@@ -1,3 +1,6 @@
+# At the top of Gui.py
+from Receipt import Receipt         # <--- Must match file name 'Receipt.py'
+from CloudManager import CloudManager # <--- Must match file name 'CloudManager.py'
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import threading
@@ -7,11 +10,12 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
+# --- IMPORT YOUR BACKEND ---
 from OCRProcessor import OCRProcessor
 from CloudManager import CloudManager
 from Receipt import Receipt
 from types import SimpleNamespace
+from SmartCategorizer import categorize_item
 
 class SnapCartApp(ctk.CTk):
     def __init__(self):
@@ -93,22 +97,33 @@ class SnapCartApp(ctk.CTk):
         try:
             raw_text = self.ocr_engine.extract_text(file_path)
             data = self.ocr_engine.parse_receipt(raw_text)
-            
-            # Connect to Brain/Cloud via CloudManager
-            categorized = self.cloud_manager.process_and_save(data['items'], data['total'])
-            
+
+            # Categorize items using the grocery item categorizer
+            categorized_items = []
+            for name, price in data['items']:
+                category, subcategory = categorize_item(name)
+                categorized_items.append({
+                    'name': name,
+                    'price': price,
+                    'category': category,
+                    'subcategory': subcategory
+                })
+
+            # Save to cloud
+            self.categorized_items = self.cloud_manager.process_and_save(
+                [(item['name'], item['price']) for item in categorized_items], data['total']
+            )
+
             # Build a Receipt object for this scan and store it
             receipt_obj = Receipt(store_name="Unknown", date=datetime.now())
-            for it in categorized:
-                # `Receipt.add_item` expects an object with a `price` attribute.
-                # Use a lightweight SimpleNamespace so we don't require an Item class.
+            for it in categorized_items:
                 item_obj = SimpleNamespace(name=it.get('name'), price=it.get('price'), category=it.get('category'), subcategory=it.get('subcategory'))
                 receipt_obj.add_item(item_obj)
             self.receipts.append(receipt_obj)
 
             # Store for the report tab (preserve existing structure)
-            self.all_scanned_items.extend(categorized)
-            
+            self.all_scanned_items.extend(categorized_items)
+
             self.after(0, lambda: self.display_editor_items(data['items']))
             self.after(0, lambda: self.lbl_total.configure(text=f"TOTAL: ${data['total']:.2f}"))
         finally:
