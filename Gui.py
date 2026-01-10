@@ -8,7 +8,6 @@ matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-# --- IMPORT YOUR BACKEND ---
 from OCRProcessor import OCRProcessor
 from CloudManager import CloudManager
 from Receipt import Receipt
