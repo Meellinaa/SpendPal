@@ -1,4 +1,5 @@
 import re
+import difflib
 from datetime import datetime, timedelta
 
 # ---------------- CATEGORY TARGETS ----------------
@@ -15,45 +16,55 @@ def categorize_item(item_name):
     Categorize an item name into (main_category, sub_category).
     Extend the KEYWORDS dict below to add more rules.
     """
-    name = item_name.lower()
 
-    # Load grocery list from file (cache after first load)
+    # Clean and normalize the item name
+    name = item_name.lower()
+    # Replace common number-to-letter substitutions
+    substitutions = str.maketrans({
+        '0': 'o',
+        '1': 'i',
+        '3': 'e',
+        '4': 'a',
+        '5': 's',
+        '7': 't',
+        '8': 'b',
+        '9': 'g',
+    })
+    name = name.translate(substitutions)
+    name = re.sub(r'[^a-z ]+', ' ', name)  # Remove punctuation/special chars (now only letters and spaces)
+    name = re.sub(r'\s+', ' ', name).strip()  # Collapse whitespace
+
+
+    # Load grocery lists from both files (cache after first load)
     if not hasattr(categorize_item, "_grocery_set"):
-        with open("grocery_items_cleaned.txt") as f:
-            categorize_item._grocery_set = set(line.strip().lower() for line in f if line.strip())
+        grocery_set = set()
+        for fname in ["grocery_items_cleaned.txt", "grocery_items.txt"]:
+            try:
+                with open(fname) as f:
+                    grocery_set.update(line.strip().lower() for line in f if line.strip())
+            except FileNotFoundError:
+                pass
+        categorize_item._grocery_set = grocery_set
     grocery_set = categorize_item._grocery_set
 
-    # If exact match in grocery list, always categorize as Groceries
-    if name in grocery_set:
-        return "Groceries", "Matched List"
 
-    # Main categories and their subcategories with keywords
-    KEYWORDS = {
-        "Groceries": {
-            "Produce": ["apple", "banana", "lettuce", "corn", "avocado", "tomato", "carrot", "spinach"],
-            "Dairy": ["milk", "cheese", "yogurt", "butter", "cream"],
-            "Meat": ["steak", "chicken", "beef", "pork", "turkey", "fish", "salmon"],
-            "Snacks": ["chip", "cookie", "oreo", "cracker", "popcorn", "candy"],
-            "Bakery": ["bread", "bun", "roll", "bagel", "croissant"],
-        },
-        "Dining Out": {
-            "General": ["uber", "restaurant", "coffee", "cafe", "starbucks", "dunkin", "pizza", "burger", "takeout", "delivery"],
-        },
-        "Shopping": {
-            "General": ["amazon", "walmart", "target", "costco", "mall", "clothes", "shoes", "electronics"],
-        },
-        "Other": {
-            "General": []
-        }
-    }
+    # If any word in the cleaned name matches a grocery item, categorize as Groceries
+    for word in name.split():
+        if word in grocery_set:
+            return "Groceries", "Matched Word"
 
-    for main_cat, subcats in KEYWORDS.items():
-        for sub_cat, kw_list in subcats.items():
-            for kw in kw_list:
-                if kw in name:
-                    return main_cat, sub_cat
+    # Fuzzy match: for each word, find close matches in grocery_set
+    for word in name.split():
+        close = difflib.get_close_matches(word, grocery_set, n=1, cutoff=0.8)
+        if close:
+            return "Groceries", f"Fuzzy ({close[0]})"
 
-    # Default fallback
+    # If any grocery item is a substring of the name (for partial/fuzzy match)
+    for grocery in grocery_set:
+        if grocery in name:
+            return "Groceries", "Fuzzy Match"
+
+    # No more hardcoded keywords. If not a grocery, fallback to Other.
     return "Other", "General"
 
 def categorize_grocery_file(filename="grocery_items_cleaned.txt"):

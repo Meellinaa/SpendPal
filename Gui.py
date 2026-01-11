@@ -1,21 +1,18 @@
-# At the top of Gui.py
-from Receipt import Receipt         # <--- Must match file name 'Receipt.py'
-from CloudManager import CloudManager # <--- Must match file name 'CloudManager.py'
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import threading
-import re
-from datetime import datetime, timedelta
+from datetime import datetime
 import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-# --- IMPORT YOUR BACKEND ---
+import matplotlib.pyplot as plt
+
+# --- YOUR CUSTOM MODULES ---
+# Ensure these files are in the same folder!
 from OCRProcessor import OCRProcessor
 from CloudManager import CloudManager
 from Receipt import Receipt
-from types import SimpleNamespace
-from SmartCategorizer import categorize_item
 
 class SnapCartApp(ctk.CTk):
     def __init__(self):
@@ -28,8 +25,7 @@ class SnapCartApp(ctk.CTk):
         # Initialize Engines
         self.ocr_engine = OCRProcessor()
         self.cloud_manager = CloudManager()
-        self.all_scanned_items = [] # To hold data for the report (list of item dicts)
-        self.receipts = [] # List of `Receipt` objects for each scanned receipt
+        self.all_scanned_items = [] 
         
         # --- SIDEBAR ---
         self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
@@ -51,6 +47,7 @@ class SnapCartApp(ctk.CTk):
         self.editor_frame = ctk.CTkFrame(self.container, fg_color="transparent")
         self.report_frame = ctk.CTkFrame(self.container, fg_color="transparent")
         
+        # Setup UI
         self.setup_editor_ui()
         self.setup_report_ui()
         
@@ -97,83 +94,123 @@ class SnapCartApp(ctk.CTk):
         try:
             raw_text = self.ocr_engine.extract_text(file_path)
             data = self.ocr_engine.parse_receipt(raw_text)
-
-            # Categorize items using the grocery item categorizer
-            categorized_items = []
-            for name, price in data['items']:
-                category, subcategory = categorize_item(name)
-                categorized_items.append({
-                    'name': name,
-                    'price': price,
-                    'category': category,
-                    'subcategory': subcategory
-                })
-
-            # Save to cloud
-            self.categorized_items = self.cloud_manager.process_and_save(
-                [(item['name'], item['price']) for item in categorized_items], data['total']
-            )
-
-            # Build a Receipt object for this scan and store it
-            receipt_obj = Receipt(store_name="Unknown", date=datetime.now())
-            for it in categorized_items:
-                item_obj = SimpleNamespace(name=it.get('name'), price=it.get('price'), category=it.get('category'), subcategory=it.get('subcategory'))
-                receipt_obj.add_item(item_obj)
-            self.receipts.append(receipt_obj)
-
-            # Store for the report tab (preserve existing structure)
+            
+            # 1. Save to Cloud (Returns FIXED items with categories)
+            categorized_items = self.cloud_manager.process_and_save(data['items'], data['total'])
+            
+            # 2. Update local memory
             self.all_scanned_items.extend(categorized_items)
-
-            self.after(0, lambda: self.display_editor_items(data['items']))
+            
+            # 3. Update UI
+            self.after(0, lambda: self.display_editor_items(categorized_items))
             self.after(0, lambda: self.lbl_total.configure(text=f"TOTAL: ${data['total']:.2f}"))
-        finally:
+            
+            # 4. Refresh Report
+            self.after(0, self.refresh_report)
+            self.after(0, lambda: self.btn_scan.configure(state="normal", text="📸 Scan Receipt"))
+            
+        except Exception as e:
+            print(f"Error in OCR thread: {e}")
             self.after(0, lambda: self.btn_scan.configure(state="normal", text="📸 Scan Receipt"))
 
     def display_editor_items(self, items):
+        # Clear old rows
         for w in self.scroll_frame.winfo_children(): w.destroy()
         self.item_rows.clear()
-        for name, price in items:
+        
+        # FIX: Handle the dictionary format from CloudManager
+        for item in items:
+            name = item['name']
+            price = item['price']
+            
             row = ctk.CTkFrame(self.scroll_frame)
             row.pack(fill="x", pady=2)
-            ent_name = ctk.CTkEntry(row, height=30); ent_name.insert(0, name); ent_name.pack(side="left", padx=10, fill="x", expand=True)
-            ent_price = ctk.CTkEntry(row, width=80); ent_price.insert(0, f"{price:.2f}"); ent_price.pack(side="right", padx=10)
+            
+            ent_name = ctk.CTkEntry(row, height=30)
+            ent_name.insert(0, name)
+            ent_name.pack(side="left", padx=10, fill="x", expand=True)
+            
+            ent_price = ctk.CTkEntry(row, width=80)
+            ent_price.insert(0, f"{price:.2f}")
+            ent_price.pack(side="right", padx=10)
+            
             self.item_rows.append({"name": ent_name, "price": ent_price})
 
     # ---------------- REPORT LOGIC ----------------
     def setup_report_ui(self):
-        ctk.CTkLabel(self.report_frame, text="SPENDING ANALYTICS", font=("Arial", 22, "bold")).pack(pady=10)
-        
-        self.report_total = ctk.CTkLabel(self.report_frame, text="All-Time Spent: $0.00", font=("Arial", 18))
-        self.report_total.pack()
-
-        self.fig_frame = ctk.CTkFrame(self.report_frame)
-        self.fig_frame.pack(fill="both", expand=True, pady=20)
+        # Create initial structure (called once at startup)
+        self.report_frame.grid_columnconfigure(0, weight=1)
+        self.report_frame.grid_rowconfigure(0, weight=1)
+        self.report_frame.grid_rowconfigure(1, weight=2)
+        # Initial draw
+        self.refresh_report()
 
     def refresh_report(self):
-        # Clear old chart
-        for w in self.fig_frame.winfo_children(): w.destroy()
-        
-        if not self.all_scanned_items:
-            ctk.CTkLabel(self.fig_frame, text="No data. Scan a receipt in the Editor tab first!").pack(pady=50)
-            return
+        # 1. Clear previous view
+        for widget in self.report_frame.winfo_children():
+            widget.destroy()
 
-        # Simple Aggregation
+        # --- A. PIE CHART (Top) ---
+        chart_frame = ctk.CTkFrame(self.report_frame, fg_color="transparent")
+        chart_frame.grid(row=0, column=0, sticky="nsew", pady=10)
+        
         totals = {}
-        for item in self.all_scanned_items:
-            cat = item.get('category', 'Other')
-            totals[cat] = totals.get(cat, 0) + item['price']
-
-        self.report_total.configure(text=f"All-Time Spent: ${sum(totals.values()):.2f}")
-
-        # Draw Chart
-        fig = Figure(figsize=(5, 4), facecolor="#2b2b2b")
-        ax = fig.add_subplot(111)
-        ax.pie(totals.values(), labels=totals.keys(), autopct='%1.1f%%', colors=['#2563EB', '#10B981', '#F59E0B', '#EF4444'])
-        ax.set_title("Spending by Category", color="white")
+        all_receipts = list(self.cloud_manager.receipts_col.find().sort("date", -1))
         
-        canvas = FigureCanvasTkAgg(fig, self.fig_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
+        for receipt in all_receipts:
+            for item in receipt.get("items", []):
+                cat = item.get("category", "Other")
+                price = item.get("price", 0.0)
+                totals[cat] = totals.get(cat, 0) + price
+
+        if totals:
+            fig = plt.Figure(figsize=(5, 4), dpi=100)
+            fig.patch.set_facecolor('#2b2b2b')
+            ax = fig.add_subplot(111)
+            
+            labels = list(totals.keys())
+            sizes = list(totals.values())
+            colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6']
+            
+            wedges, texts, autotexts = ax.pie(sizes, labels=labels, autopct='%1.1f%%',
+                                            startangle=90, colors=colors[:len(labels)])
+            
+            for text in texts + autotexts: text.set_color('white')
+            ax.set_title(f"Total Spent: ${sum(sizes):.2f}", color="white")
+            
+            canvas = FigureCanvasTkAgg(fig, master=chart_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill="both", expand=True)
+        else:
+            ctk.CTkLabel(chart_frame, text="No Data Yet").pack(pady=50)
+
+        # --- B. ITEMIZED LIST (Bottom) ---
+        list_label = ctk.CTkLabel(self.report_frame, text="Recent Transactions", font=("Arial", 16, "bold"))
+        list_label.grid(row=1, column=0, sticky="w", padx=20, pady=(10,0))
+
+        scroll_frame = ctk.CTkScrollableFrame(self.report_frame, label_text="Item History")
+        scroll_frame.grid(row=2, column=0, sticky="nsew", padx=20, pady=10)
+
+        for receipt in all_receipts:
+            date_str = receipt['date'].strftime("%Y-%m-%d %H:%M")
+            header_text = f"🛒 {receipt.get('store', 'Receipt')} ({date_str})"
+            
+            trip_frame = ctk.CTkFrame(scroll_frame)
+            trip_frame.pack(fill="x", pady=5)
+            
+            ctk.CTkLabel(trip_frame, text=header_text, font=("Arial", 12, "bold"), text_color="#3B82F6").pack(anchor="w", padx=10, pady=2)
+
+            for item in receipt.get("items", []):
+                item_row = ctk.CTkFrame(trip_frame, fg_color="transparent")
+                item_row.pack(fill="x", padx=10, pady=1)
+                
+                name = item.get('name', 'Unknown')
+                cat = item.get('category', 'General')
+                price = item.get('price', 0.0)
+
+                ctk.CTkLabel(item_row, text=f"• {name}", width=200, anchor="w").pack(side="left")
+                ctk.CTkLabel(item_row, text=cat, text_color="gray").pack(side="left", padx=10)
+                ctk.CTkLabel(item_row, text=f"${price:.2f}").pack(side="right")
 
 if __name__ == "__main__":
     app = SnapCartApp()
